@@ -1,0 +1,51 @@
+# ===== Dataset files (too large for git, ~2.4GB total) =====
+student_resource/dataset/
+
+# ===== macOS archive artifacts =====
+__MACOSX/
+
+# ===== OS-generated metadata =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# ===== Virtual environments =====
+venv/
+.venv/
+env/
+.env/
+
+# ===== Jupyter Notebooks =====
+.ipynb_checkpoints/
+
+# ===== EDA generated outputs =====
+eda/plots/
+eda/sim_sample_results.csv
+eda/gt_summary.txt
+
+# ===== Model artifacts & outputs (large binaries) =====
+output/
+models/
+*.pt
+*.pth
+*.onnx
+*.pkl
+*.joblib
+*.bin
+
+# ===== IDE / Editor =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
