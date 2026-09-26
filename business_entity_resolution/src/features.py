@@ -157,6 +157,13 @@ if __name__ == "__main__":
         # S1 ids hashed into buckets: 0-2 -> model training (30%), 9 -> validation (10%)
         bucket = pl.col("s1").hash(7) % 10
         cname = f"train{sfx}_cand.parquet"
+        if "--rest" in sys.argv:
+            # every pair not covered by the two sets below, so that all train pairs have features
+            def rest(c):
+                val_o = c.filter(bucket == 9).select("other").unique()
+                return c.filter(bucket >= 3).join(val_o, on="other", how="anti")
+            build("train", rest, f"rest{sfx}_feats", cand_name=cname)
+            sys.exit()
         build("train", lambda c: c.filter(bucket < 3), f"train{sfx}_feats", cand_name=cname)
         # validation keeps every competing candidate of the S2/S3 records touching validation S1s,
         # so the one-owner assignment is evaluated exactly as at inference time

@@ -3,6 +3,7 @@ import json
 import sys
 
 import lightgbm as lgb
+import numpy as np
 import polars as pl
 
 from config import WORK
@@ -20,13 +21,27 @@ def labels():
     return pl.read_parquet(WORK / "train_pairs.parquet").with_columns(pl.lit(1, pl.Int8).alias("y"))
 
 
+def load_xy(folder):
+    """Stack feature parts into one float32 matrix part by part, so peak memory stays near the matrix size."""
+    parts = sorted((WORK / folder).glob("*.parquet"))
+    n = sum(pl.scan_parquet(p).select(pl.len()).collect().item() for p in parts)
+    x = np.empty((n, len(FEATURES)), dtype=np.float32)
+    y = np.empty(n, dtype=np.int8)
+    lab = labels()
+    i = 0
+    for p in parts:
+        df = pl.read_parquet(p).join(lab, on=["s1", "other"], how="left")
+        x[i:i + len(df)] = df.select(FEATURES).to_numpy().astype(np.float32, copy=False)
+        y[i:i + len(df)] = df["y"].fill_null(0).to_numpy()
+        i += len(df)
+    return x, y
+
+
 def train(sfx=""):
-    tr = (pl.read_parquet(WORK / f"train{sfx}_feats" / "*.parquet")
-            .join(labels(), on=["s1", "other"], how="left").with_columns(pl.col("y").fill_null(0)))
-    print("train rows", len(tr), "pos rate", round(tr["y"].mean(), 4), flush=True)
-    x, y = tr.select(FEATURES).to_numpy(), tr["y"].to_numpy()
-    del tr
-    dtrain = lgb.Dataset(x, y, feature_name=FEATURES, free_raw_data=True)
+    x, y = load_xy(f"train{sfx}_feats")
+    print("train rows", len(y), "pos rate", round(float(y.mean()), 4), flush=True)
+    dtrain = lgb.Dataset(x, y, feature_name=FEATURES, params=PARAMS, free_raw_data=True).construct()
+    del x
     booster = lgb.train(PARAMS, dtrain, num_boost_round=N_ROUNDS, callbacks=[lgb.log_evaluation(100)])
     booster.save_model(str(WORK / f"lgb{sfx}.txt"))
     return booster

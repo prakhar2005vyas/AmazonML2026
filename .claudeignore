@@ -1,0 +1,16 @@
+﻿venv/
+.venv/
+env/
+__pycache__/
+*.csv
+*.parquet
+*.h5
+*.pt
+*.pth
+*.onnx
+*.bin
+*.zip
+*.tar.gz
+output/
+student_resource/
+6ab10eb3b23ba_student_resource/
