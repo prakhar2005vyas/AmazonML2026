@@ -114,23 +114,42 @@ def _pair(r):
 
 
 def _work(rows):
-    return [_pair(r) for r in rows]
+    # float32 array rather than lists of Python floats: ~8x less to pickle back and to hold in the parent
+    return np.asarray([_pair(r) for r in rows], dtype=np.float32).reshape(-1, len(FEATURES_X))
 
 
-def extra_features(pairs, split, workers=11):
+def iter_extra(pairs, split, workers=6, batch_size=500_000, skip=()):
+    """Yields (start, frame of FEATURES_X) for consecutive row slices of pairs, in order.
+
+    Batching keeps the parent's string rows and results bounded to one slice at a time (the full test set
+    OOM'd when materialised at once). Starts listed in skip are not computed (resume support).
+    """
+    t = time.time()
+    s1_norm = pl.read_parquet(WORK / f"{split}_s1_norm.parquet", columns=["entity_id"] + COLS)
+    other_norm = pl.concat([pl.read_parquet(WORK / f"{split}_s{i}_norm.parquet", columns=["entity_id"] + COLS)
+                            for i in (2, 3)])
+    idf = build_idf(split)
+    n = len(pairs)
+    with Pool(workers, initializer=_init, initargs=(idf,)) as pool:
+        for start in range(0, n, batch_size):
+            if start in skip:
+                continue
+            j = (pairs.slice(start, batch_size).select("s1", "other")
+                 .join(s1_norm, left_on="s1", right_on="entity_id", how="left", maintain_order="left")
+                 .join(other_norm, left_on="other", right_on="entity_id", how="left", suffix="_o", maintain_order="left"))
+            rows = j.select(COLS + [c + "_o" for c in COLS]).fill_null("").rows()
+            del j
+            chunks = [rows[k:k + 20000] for k in range(0, len(rows), 20000)]
+            del rows
+            x = np.concatenate(list(pool.imap(_work, chunks)))
+            del chunks
+            print(f"  extra_features {min(start + batch_size, n)}/{n} {time.time() - t:.0f}s", flush=True)
+            yield start, pl.DataFrame(x, schema=FEATURES_X)
+
+
+def extra_features(pairs, split, workers=6, batch_size=500_000):
     """pairs: frame with s1, other. Returns pairs with FEATURES_X appended (same row order)."""
     t = time.time()
-    s1 = pl.read_parquet(WORK / f"{split}_s1_norm.parquet", columns=["entity_id"] + COLS)
-    other = pl.concat([pl.read_parquet(WORK / f"{split}_s{i}_norm.parquet", columns=["entity_id"] + COLS)
-                       for i in (2, 3)])
-    j = (pairs.select("s1", "other").join(s1, left_on="s1", right_on="entity_id", how="left", maintain_order="left")
-              .join(other, left_on="other", right_on="entity_id", how="left", suffix="_o", maintain_order="left"))
-    rows = j.select(COLS + [c + "_o" for c in COLS]).fill_null("").rows()
-    del j, s1, other
-    idf = build_idf(split)
-    chunks = [rows[k:k + 20000] for k in range(0, len(rows), 20000)]
-    with Pool(workers, initializer=_init, initargs=(idf,)) as pool:
-        feats = [f for res in pool.imap(_work, chunks) for f in res]
-    x = pl.DataFrame(np.asarray(feats, dtype=np.float32), schema=FEATURES_X, orient="row")
+    x = pl.concat([f for _, f in iter_extra(pairs, split, workers, batch_size)])
     print("extra features", len(pairs), f"{time.time() - t:.0f}s", flush=True)
     return pl.concat([pairs, x], how="horizontal")

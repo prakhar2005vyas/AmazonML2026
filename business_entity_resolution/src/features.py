@@ -119,8 +119,9 @@ def context_features(cand):
     )
 
 
-def build(split, keep=None, out_name=None, chunk=1_000_000, cand_name=None):
-    """keep: optional callable(cand) -> filtered cand, applied after global context features."""
+def build(split, keep=None, out_name=None, chunk=1_000_000, cand_name=None, resume=False):
+    """keep: optional callable(cand) -> filtered cand, applied after global context features.
+    resume: skip parts already on disk; only valid when keep() returns a deterministically ordered frame."""
     cand = context_features(pl.read_parquet(WORK / (cand_name or f"{split}_cand.parquet")))
     if keep is not None:
         cand = keep(cand)
@@ -134,6 +135,9 @@ def build(split, keep=None, out_name=None, chunk=1_000_000, cand_name=None):
     out_dir.mkdir(exist_ok=True)
     with Pool(11, initializer=_init, initargs=(idf,)) as pool:
         for ci, i in enumerate(range(0, len(cand), chunk)):
+            dest = out_dir / f"part{ci:04d}.parquet"
+            if resume and dest.exists():
+                continue
             t = time.time()
             part = cand.slice(i, chunk)
             j = (part.select("s1", "other")
@@ -145,7 +149,9 @@ def build(split, keep=None, out_name=None, chunk=1_000_000, cand_name=None):
             fdf = pl.DataFrame(np.asarray(feats, dtype=np.float32), schema=STRING_FEATS, orient="row")
             outp = pl.concat([part.select(["s1", "other"] + [c for c in FEATURES if c not in STRING_FEATS]),
                               fdf], how="horizontal")
-            outp.with_columns(pl.col(c).cast(pl.Float32) for c in FEATURES).write_parquet(out_dir / f"part{ci:04d}.parquet")
+            tmp = dest.with_suffix(".tmp")  # write-then-rename: a crash never leaves a truncated part behind
+            outp.with_columns(pl.col(c).cast(pl.Float32) for c in FEATURES).write_parquet(tmp)
+            tmp.replace(dest)
             print(split, "chunk", ci, len(part), f"{time.time() - t:.0f}s", flush=True)
 
 
@@ -161,8 +167,9 @@ if __name__ == "__main__":
             # every pair not covered by the two sets below, so that all train pairs have features
             def rest(c):
                 val_o = c.filter(bucket == 9).select("other").unique()
-                return c.filter(bucket >= 3).join(val_o, on="other", how="anti")
-            build("train", rest, f"rest{sfx}_feats", cand_name=cname)
+                # sorted so chunk boundaries are identical across runs, which makes resume safe
+                return c.filter(bucket >= 3).join(val_o, on="other", how="anti").sort("s1", "other")
+            build("train", rest, f"rest{sfx}_feats", cand_name=cname, resume=True)
             sys.exit()
         build("train", lambda c: c.filter(bucket < 3), f"train{sfx}_feats", cand_name=cname)
         # validation keeps every competing candidate of the S2/S3 records touching validation S1s,

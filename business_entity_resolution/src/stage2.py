@@ -1,4 +1,4 @@
-﻿"""Second-stage re-scorer.
+"""Second-stage re-scorer.
 
 Stage 1 scores every candidate pair in isolation. Stage 2 adds how that score compares with the competing
 candidates of the same S2/S3 record and of the same S1 record (max, runner-up, rank, mass), then re-scores
@@ -8,6 +8,7 @@ usage:
   stage2.py val  [tag]   stage-1 score val parts, cross-validate stage 2 on held-out S1, fit final stage 2
   stage2.py test [tag]   stage-1 score test parts, apply stage 2, write outputs
 """
+import gc
 import json
 import sys
 
@@ -26,6 +27,7 @@ PARAMS2 = dict(objective="binary", learning_rate=0.05, num_leaves=127, min_data_
                feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1, lambda_l2=1.0,
                max_bin=255, num_threads=11, verbose=-1)
 N_ROUNDS2 = 800
+PRED_BATCH = 1_000_000  # rows per predict call: bounds the dense matrix copies LightGBM makes
 
 
 # integer keys keep the global window functions over ~20M pairs cheap
@@ -39,12 +41,21 @@ def stage1_score(booster, folder):
     allp, kept = [], []
     for part in sorted((WORK / folder).glob("*.parquet")):
         df = pl.read_parquet(part)
-        p = booster.predict(df.select(FEATURES).to_numpy(), num_threads=11).astype(np.float32)
-        df = df.with_columns(pl.Series("p", p))
-        df = df.with_columns(ID_INTS)
+        x = df.select(FEATURES).to_numpy()
+        p = booster.predict(x, num_threads=11).astype(np.float32)
+        del x
+        df = df.with_columns(pl.Series("p", p)).with_columns(ID_INTS)
+        del p
         allp.append(df.select("s1i", "oi", "p"))
         kept.append(df.filter(pl.col("p") >= PRUNE))
+        del df
+    gc.collect()
     return pl.concat(allp), pl.concat(kept)
+
+
+def predict_batched(booster, df, cols):
+    return np.concatenate([booster.predict(df.slice(i, PRED_BATCH).select(cols).to_numpy(), num_threads=11)
+                           for i in range(0, len(df), PRED_BATCH)]).astype(np.float32)
 
 
 def p_context(allp):
@@ -86,6 +97,7 @@ def build(booster, folder):
     ctx = p_context(allp).filter(pl.col("p") >= PRUNE).select(["s1i", "oi"] + [c for c in CTX if c != "p"])
     del allp
     df = kept.join(ctx, on=["s1i", "oi"], how="inner").drop("s1i", "oi")
+    del kept, ctx
     if TAG2:
         df = extra_features(df, "test" if folder.startswith("test") else "train")
     return df
@@ -153,8 +165,10 @@ def run_test(sfx):
     with open(WORK / f"decision2{sfx}{TAG2}.json") as fh:
         thr = json.load(fh)["thr"]
     df = build(b1, "test_feats")
-    df = df.with_columns(pl.Series("q", b2.predict(df.select(FEATURES2).to_numpy().astype(np.float32), num_threads=11)))
-    df.select("s1", "other", "p", "q").write_parquet(WORK / f"test{sfx}_s2{TAG2}_scored.parquet")
+    q = predict_batched(b2, df, FEATURES2)
+    df = df.select("s1", "other", "p").with_columns(pl.Series("q", q))  # drop the wide feature frame
+    gc.collect()
+    df.write_parquet(WORK / f"test{sfx}_s2{TAG2}_scored.parquet")
     pred = df.sort("q", descending=True).unique("other", keep="first").filter(pl.col("q") >= thr)
     print("test pairs after prune", len(df), "predicted", len(pred), "thr", thr, flush=True)
     s1_ids = pl.read_parquet(WORK / "test_s1.parquet", columns=["entity_id"]).rename({"entity_id": "s1"})
