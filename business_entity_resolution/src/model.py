@@ -70,7 +70,7 @@ def evaluate(booster, sfx=""):
     va.write_parquet(WORK / f"val{sfx}_scored.parquet")
     s1_all = pl.read_parquet(WORK / "train_s1_norm.parquet", columns=["entity_id"]).rename({"entity_id": "s1"})
     val_mask = pl.col("s1").hash(7) % 10 == 9
-    if sfx == "_hard":
+    if sfx.startswith("_hard"):
         val_mask = val_mask & hard_keep("s1")
     val_ids = s1_all.filter(val_mask)["s1"]
     truth = pl.read_parquet(WORK / "train_pairs.parquet").filter(pl.col("s1").is_in(val_ids.implode()))

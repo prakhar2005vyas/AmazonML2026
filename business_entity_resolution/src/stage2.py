@@ -5,8 +5,12 @@ candidates of the same S2/S3 record and of the same S1 record (max, runner-up, r
 the pairs that stage 1 did not already rule out.
 
 usage:
-  stage2.py val  [tag]   stage-1 score val parts, cross-validate stage 2 on held-out S1, fit final stage 2
-  stage2.py test [tag]   stage-1 score test parts, apply stage 2, write outputs
+  stage2.py val  [tag] [--x | --x2]              cross-validate stage 2 on held-out S1, fit final stage 2
+  stage2.py test [tag] [--x | --x2] [--out DIR]  stage-1 score test parts, apply stage 2, write outputs
+
+--x adds the distractor-aware extras (FEATURES_X); --x2 adds those plus FEATURES_X2 (plan v2, stage 1).
+Stage-1-scored base frames and every extra feature group are cached in WORK, so a later run with the same
+stage-1 model only computes what is new. --out DIR writes the submission to output/DIR instead of output/.
 """
 import gc
 import json
@@ -19,7 +23,7 @@ import polars as pl
 from blocking import hard_keep
 from config import WORK
 from features import FEATURES
-from features2 import FEATURES_X, extra_features
+from features2 import FEATURES_X, FEATURES_X2, iter_extra
 from metrics import macro_f05
 
 PRUNE = 0.002  # pairs below this stage-1 probability are dropped before stage 2 (and never predicted)
@@ -27,6 +31,7 @@ PARAMS2 = dict(objective="binary", learning_rate=0.05, num_leaves=127, min_data_
                feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1, lambda_l2=1.0,
                max_bin=255, num_threads=11, verbose=-1)
 N_ROUNDS2 = 800
+TEST_SFX = {"_hard2": "_v2", "_hard3": "_v3"}  # train tag -> test candidate/feature tag (the "_hard" pipeline uses untagged test files)
 PRED_BATCH = 1_000_000  # rows per predict call: bounds the dense matrix copies LightGBM makes
 
 
@@ -87,26 +92,53 @@ def p_context(allp):
 CTX = ["p", "logit", "pmax_o", "p2_o", "prk_o", "psum_o", "n05_o", "n01_o", "gap_o", "rival_o",
        "pmax_s", "p2_s", "prk_s", "psum_s", "n05_s", "n01_s", "gap_s", "rival_s"]
 FEATURES2 = FEATURES + CTX
-if "--x" in sys.argv:
-    FEATURES2 = FEATURES2 + FEATURES_X
-TAG2 = "x" if "--x" in sys.argv else ""
+GROUPS2 = []
+if "--x2" in sys.argv:
+    GROUPS2 = [("x", FEATURES_X), ("x2", FEATURES_X2)]
+elif "--x" in sys.argv:
+    GROUPS2 = [("x", FEATURES_X)]
+for _g, _names in GROUPS2:
+    FEATURES2 = FEATURES2 + _names
+TAG2 = GROUPS2[-1][0] if GROUPS2 else ""
 
 
 def build(booster, folder):
+    """Stage-1 scores plus context features for the pairs that survive PRUNE (no extra feature groups)."""
     allp, kept = stage1_score(booster, folder)
     ctx = p_context(allp).filter(pl.col("p") >= PRUNE).select(["s1i", "oi"] + [c for c in CTX if c != "p"])
     del allp
     df = kept.join(ctx, on=["s1i", "oi"], how="inner").drop("s1i", "oi")
     del kept, ctx
-    if TAG2:
-        df = extra_features(df, "test" if folder.startswith("test") else "train")
+    return df
+
+
+def with_groups(df, split, stem):
+    """Append every requested extra feature group. Each group is cached as WORK/{stem}_{group}.parquet
+    (keys + features, same row order as df) and reused when its keys match df exactly."""
+    for group, names in GROUPS2:
+        path = WORK / f"{stem}_{group}.parquet"
+        x = None
+        if path.exists():
+            x = pl.read_parquet(path)
+            if not (len(x) == len(df) and x["s1"].equals(df["s1"]) and x["other"].equals(df["other"])):
+                print("cache", path.name, "does not match the rows, recomputing", flush=True)
+                x = None
+        if x is None:
+            x = pl.concat([f for _, f in iter_extra(df.select("s1", "other"), split, group=group)])
+            x = pl.concat([df.select("s1", "other"), x], how="horizontal")
+            tmp = path.with_suffix(".tmp")
+            x.write_parquet(tmp)
+            tmp.replace(path)
+        df = pl.concat([df, x.select(names)], how="horizontal")
+        del x
+        gc.collect()
     return df
 
 
 def val_ids(sfx):
     s1_all = pl.read_parquet(WORK / "train_s1_norm.parquet", columns=["entity_id"]).rename({"entity_id": "s1"})
     m = pl.col("s1").hash(7) % 10 == 9
-    if sfx == "_hard":
+    if sfx.startswith("_hard"):
         m = m & hard_keep("s1")
     return s1_all.filter(m)["s1"]
 
@@ -125,13 +157,14 @@ def sweep(scored, truth, ids, tag):
 def run_val(sfx):
     lab = pl.read_parquet(WORK / "train_pairs.parquet").with_columns(pl.lit(1, pl.Int8).alias("y"))
     base = WORK / f"val{sfx}_s2.parquet"
-    if TAG2 and base.exists():  # reuse the stage-1 scored, pruned pairs of a previous run
-        df = extra_features(pl.read_parquet(base), "train")
+    if base.exists():  # reuse the stage-1 scored, pruned pairs of a previous run
+        df = pl.read_parquet(base)
     else:
         b1 = lgb.Booster(model_file=str(WORK / f"lgb{sfx}.txt"))
         df = build(b1, f"val{sfx}_feats")
         df = df.join(lab, on=["s1", "other"], how="left").with_columns(pl.col("y").fill_null(0))
-        df.write_parquet(WORK / f"val{sfx}_s2{TAG2}.parquet")
+        df.write_parquet(base)
+    df = with_groups(df, "train", f"val{sfx}_s2")
     ids = val_ids(sfx)
     truth = lab.filter(pl.col("s1").is_in(ids.implode())).select("s1", "other")
     print("stage2 rows", len(df), "pos", int(df["y"].sum()), "truth pairs", len(truth),
@@ -164,7 +197,17 @@ def run_test(sfx):
     b2 = lgb.Booster(model_file=str(WORK / f"lgb2{sfx}{TAG2}.txt"))
     with open(WORK / f"decision2{sfx}{TAG2}.json") as fh:
         thr = json.load(fh)["thr"]
-    df = build(b1, "test_feats")
+    tsfx = TEST_SFX.get(sfx, "")
+    base = WORK / f"test{tsfx}{sfx}_s2.parquet"
+    if base.exists():  # stage-1 scored, pruned test pairs of a previous run with the same stage-1 model
+        df = pl.read_parquet(base)
+    else:
+        df = build(b1, f"test{tsfx}_feats")
+        tmp = base.with_suffix(".tmp")
+        df.write_parquet(tmp)
+        tmp.replace(base)
+    del b1
+    df = with_groups(df, "test", f"test{tsfx}{sfx}_s2")
     q = predict_batched(b2, df, FEATURES2)
     df = df.select("s1", "other", "p").with_columns(pl.Series("q", q))  # drop the wide feature frame
     gc.collect()
@@ -172,14 +215,34 @@ def run_test(sfx):
     pred = df.sort("q", descending=True).unique("other", keep="first").filter(pl.col("q") >= thr)
     print("test pairs after prune", len(df), "predicted", len(pred), "thr", thr, flush=True)
     s1_ids = pl.read_parquet(WORK / "test_s1.parquet", columns=["entity_id"]).rename({"entity_id": "s1"})
-    cand = pl.read_parquet(WORK / "test_cand.parquet", columns=["s1", "other"])
-    write_lists(cand, s1_ids, "candidate_entity_ids", OUTPUT / "candidate_pairs.tsv")
-    write_lists(pred, s1_ids, "matched_entity_ids", OUTPUT / "matching_results.tsv")
+    cand = pl.read_parquet(WORK / f"test{tsfx}_cand.parquet", columns=["s1", "other"])
+    if "--out" in sys.argv:
+        # one numbered folder per iteration, files named after it: output/03_stage2_norm/03_stage2_norm_matching_results.tsv
+        name = iteration_name(sys.argv[sys.argv.index("--out") + 1])
+        out, prefix = OUTPUT / name, f"{name}_"
+    else:  # a new pipeline never overwrites the current submission
+        out, prefix = (OUTPUT / tsfx.lstrip("_") if tsfx else OUTPUT), ""
+    out.mkdir(parents=True, exist_ok=True)
+    write_lists(cand, s1_ids, "candidate_entity_ids", out / f"{prefix}candidate_pairs.tsv")
+    write_lists(pred, s1_ids, "matched_entity_ids", out / f"{prefix}matching_results.tsv")
+
+
+def iteration_name(stage):
+    """'stage2_norm' -> 'NN_stage2_norm', NN = next free iteration number in OUTPUT (an existing folder is reused)."""
+    import re
+    from config import OUTPUT
+    existing = {p.name: p.name for p in OUTPUT.iterdir() if p.is_dir() and re.match(r"\d\d_", p.name)}
+    for n in existing:
+        if n[3:] == stage:
+            return n
+    nums = [int(n[:2]) for n in existing]
+    return f"{max(nums, default=0) + 1:02d}_{stage}"
 
 
 if __name__ == "__main__":
     split = sys.argv[1]
-    args = [a for a in sys.argv[2:] if not a.startswith("--")]
+    skip = {sys.argv.index("--out") + 1} if "--out" in sys.argv else set()
+    args = [a for i, a in enumerate(sys.argv) if i >= 2 and i not in skip and not a.startswith("--")]
     sfx = f"_{args[0]}" if args else ""
     if split == "val":
         run_val(sfx)

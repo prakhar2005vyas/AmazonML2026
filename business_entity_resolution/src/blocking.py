@@ -5,6 +5,7 @@ For every S2/S3 record retrieve its top-K S1 records under two TF-IDF views, ins
   * address view: word tokens of core name + address + house numbers + state
 S2/S3 records with no parsable state are matched country-wide on the name view only.
 """
+import os
 import sys
 import time
 
@@ -18,6 +19,13 @@ from config import WORK
 K_NAME = 3
 K_ADDR = 3
 K_NOSTATE = 5
+# v2 pipeline: records without a state are searched country-wide, where 5 name neighbours miss ~24% of their
+# true S1s (val); 20 char-gram + 20 word neighbours recover most of them (75.6% -> 89.4% pair recall)
+WIDE_TAGS = {"hard2", "v2", "hard3", "v3"}
+K_NOSTATE_WIDE = 20
+# plan v2 B1 (stage 4): records with no state are, in train, exactly the empty-address ones, and they cause 61% of
+# missed pairs (blocking recall 0.75). tags hard3/v3 give them a wider country-wide name search.
+K_NOSTATE_BY_TAG = {"hard3": int(os.environ.get("ER_K_NOSTATE", "50")), "v3": int(os.environ.get("ER_K_NOSTATE", "50"))}
 MAX_DF = 0.02
 CHUNK = 200_000
 BLOCK_MERGE = {"telangana": "andhra pradesh"}  # records swap these two freely
@@ -68,6 +76,28 @@ def search_name(s1, other, k):
                          "sim_name_blk": v})
 
 
+def search_name_word(s1, other, k):
+    """Word view of the core name: robust to token reordering and to char-gram noise from repeated affixes."""
+    q = pl.concat([other.select("entity_id", pl.col("core").alias("t")),
+                   other.filter(pl.col("alias") != "").select("entity_id", pl.col("alias").alias("t"))])
+    vec = TfidfVectorizer(analyzer="word", token_pattern=r"\S+", sublinear_tf=True, dtype=np.float32)
+    try:
+        bt = vec.fit_transform(s1["core"].to_list()).T.tocsr()
+    except ValueError:
+        return pl.DataFrame(schema={"s1": pl.String, "other": pl.String, "sim_name_blk": pl.Float32})
+    rows, cols, vals = [], [], []
+    texts = q["t"].to_list()
+    for i in range(0, len(texts), CHUNK):
+        m = sp_matmul_topn(vec.transform(texts[i:i + CHUNK]), bt, top_n=k, threshold=0.05, n_threads=11).tocoo()
+        rows.append(m.row + i)
+        cols.append(m.col)
+        vals.append(m.data)
+    r, c, v = np.concatenate(rows), np.concatenate(cols), np.concatenate(vals)
+    # scored as a name similarity so downstream features keep their meaning; char and word views merge by max
+    return pl.DataFrame({"s1": s1["entity_id"].to_numpy()[c], "other": q["entity_id"].to_numpy()[r],
+                         "sim_name_blk": v})
+
+
 def search_addr(s1, other, k):
     r, c, v = topk(s1.select(addr_text())["t"].to_list(), other.select(addr_text())["t"].to_list(), k, "word")
     return pl.DataFrame({"s1": s1["entity_id"].to_numpy()[c], "other": other["entity_id"].to_numpy()[r],
@@ -111,7 +141,8 @@ def with_blocks(df):
 def run(split, tag=None):
     """tag='hard': drop HARD_DROP of train S1 so their matches become distractors, mimicking test density."""
     s1_norm = pl.read_parquet(WORK / f"{split}_s1_norm.parquet")
-    if tag == "hard":
+    wide = tag in WIDE_TAGS
+    if tag and tag.startswith("hard"):
         s1_norm = s1_norm.filter(hard_keep())
     other = pl.concat([pl.read_parquet(WORK / f"{split}_s{i}_norm.parquet") for i in (2, 3)])
     other = infer_missing_states(split, s1_norm, other)
@@ -135,7 +166,11 @@ def run(split, tag=None):
         no_state = oc.filter(pl.col("block").is_null() | (pl.col("block") == ""))
         s1_unique = s1c.unique("entity_id", keep="first")
         if len(no_state):
-            parts.append(search_name(s1_unique, no_state.unique("entity_id"), K_NOSTATE))
+            ns = no_state.unique("entity_id")
+            k_wide = K_NOSTATE_BY_TAG.get(tag, K_NOSTATE_WIDE)
+            parts.append(search_name(s1_unique, ns, k_wide if wide else K_NOSTATE))
+            if wide:
+                parts.append(search_name_word(s1_unique, ns, k_wide))
         print(split, country, "S1", s1_unique.height, "others", oc["entity_id"].n_unique(), "no-state", len(no_state),
               "raw pairs", sum(len(p) for p in parts) - n_before, f"{time.time() - t:.0f}s", flush=True)
     cand = (pl.concat(parts, how="diagonal").fill_null(0.0)

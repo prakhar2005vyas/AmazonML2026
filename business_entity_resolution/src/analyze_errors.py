@@ -15,7 +15,7 @@ if "q" in va.columns:
     va = va.select("s1", "other", pl.col("q").alias("p"))
 s1_all = pl.read_parquet(WORK / "train_s1_norm.parquet", columns=["entity_id"]).rename({"entity_id": "s1"})
 mask = pl.col("s1").hash(7) % 10 == 9
-if sfx == "_hard":
+if sfx.startswith("_hard"):
     mask = mask & hard_keep("s1")
 val_ids = s1_all.filter(mask)
 truth = pl.read_parquet(WORK / "train_pairs.parquet").join(val_ids, on="s1", how="semi")
@@ -64,6 +64,34 @@ fp_why = fp.join(all_truth.rename({"s1": "true_s1"}), on="other", how="left").wi
     pl.when(pl.col("true_s1").is_null()).then(pl.lit("other_is_distractor"))
     .otherwise(pl.lit("other_belongs_elsewhere")).alias("why"))
 print("FP pairs", len(fp), fp_why.group_by("why").len().sort("len", descending=True))
+
+# plan v2 E1: the same breakdown restricted to S2/S3 records with a given trait, so each plan item has a
+# measured target size before and after it lands
+oth = pl.concat([pl.read_parquet(WORK / f"train_s{i}.parquet", columns=["entity_id", "business_name", "business_address"])
+                 for i in (2, 3)])
+st = pl.read_parquet(WORK / "train_other_state.parquet")
+addr = pl.col("business_address").fill_null("")
+traits = (oth.join(st, on="entity_id", how="left").select(
+    pl.col("entity_id").alias("other"),
+    pl.col("business_name").fill_null("").str.contains("[ऀ-෿]").alias("native_name"),
+    (addr.str.strip_chars() == "").alias("addr_empty"),
+    addr.str.contains(r"(?i)\b(?:\d+[a-z]{4,}|[a-z]{3,}\d+)").alias("glued_token"),
+    ((pl.col("state").fill_null("") == "") & (addr.str.strip_chars() != "")).alias("addr_but_no_state")))
+del oth
+rows = []
+for trait in ["all", "native_name", "addr_empty", "glued_token", "addr_but_no_state"]:
+    keep = traits.select("other") if trait == "all" else traits.filter(pl.col(trait)).select("other")
+    t_n = truth.join(keep, on="other", how="semi").height
+    f = fn_why.join(keep, on="other", how="semi")
+    by = dict(f.group_by("why").len().iter_rows())
+    fp_n = fp.join(keep, on="other", how="semi").height
+    nc = by.get("not_in_candidates", 0)
+    rows.append((trait, t_n, len(f), nc, by.get("below_thr", 0), by.get("stolen_by_other_s1", 0), fp_n,
+                 round(1 - nc / t_n, 4) if t_n else None, round(len(f) / t_n, 4) if t_n else None))
+with pl.Config(tbl_rows=10, tbl_width_chars=200):
+    print("--- E1 slices (pairs whose S2/S3 record has the trait)")
+    print(pl.DataFrame(rows, orient="row", schema=["trait", "truth", "fn", "fn_not_cand", "fn_below_thr", "fn_stolen",
+                                                    "fp", "block_recall", "miss_rate"]))
 
 raw = pl.concat([pl.read_parquet(WORK / f"train_s{i}.parquet", columns=["entity_id", "business_name", "business_address"])
                  for i in (1, 2, 3)])

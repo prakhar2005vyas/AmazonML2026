@@ -52,3 +52,7 @@ models/
 *.swp
 *.swo
 *~
+
+# Colab notebook with temporary presigned S3 links
+mlc.ipynb
+.claude/
