@@ -1,58 +1,48 @@
-# ===== Dataset files (too large for git, ~2.4GB total) =====
+﻿# ===== Large datasets & splits =====
+dataset/train/*.tsv
+dataset/test/*.tsv
 student_resource/dataset/
 6ab10eb3b23ba_student_resource/
-*.tsv
+
+# ===== Intermediate pipeline artifacts & caches =====
 *.parquet
+mlc26_work/
+_cand_shards_*
 
-# ===== macOS archive artifacts =====
-__MACOSX/
+# ===== Large output candidates & matching results (~686MB - 1GB+) =====
+output/**/*.tsv
+output/*.tsv
 
-# ===== OS-generated metadata =====
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# ===== Python =====
+# ===== Python bytecode & cache =====
 __pycache__/
+*.pyc
 *.py[cod]
 *$py.class
 *.egg-info/
-*.egg
 dist/
 build/
-*.whl
 
 # ===== Virtual environments =====
+.venvs/
 venv/
 .venv/
 env/
 .env/
 
-# ===== Jupyter Notebooks =====
+# ===== Jupyter & EDA scratch outputs =====
 .ipynb_checkpoints/
-
-# ===== EDA generated outputs =====
 eda/plots/
 eda/sim_sample_results.csv
 eda/gt_summary.txt
+mlc.ipynb
 
-# ===== Model artifacts & outputs (large binaries) =====
-output/
-models/
-*.pt
-*.pth
-*.onnx
-*.pkl
-*.joblib
-*.bin
-
-# ===== IDE / Editor =====
+# ===== Operating System & Editor artifacts =====
+.DS_Store
+Thumbs.db
+desktop.ini
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# Colab notebook with temporary presigned S3 links
-mlc.ipynb
 .claude/
