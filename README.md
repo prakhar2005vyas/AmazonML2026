@@ -1,4 +1,4 @@
-﻿# Amazon ML Challenge 2026: Business Entity Resolution
+# Amazon ML Challenge 2026: Business Entity Resolution
 
 A machine learning pipeline for large-scale multilingual business entity resolution across heterogeneous data sources, built for the **Amazon ML Challenge 2026** by **Prakhar Vyas** and [@atharvaajmera](https://github.com/atharvaajmera).
 
@@ -7,6 +7,14 @@ A machine learning pipeline for large-scale multilingual business entity resolut
 ## Problem Statement
 
 The challenge requires resolving noisy business entity records across three distinct sources ($S_1$, $S_2$, $S_3$) spanning three geographic jurisdictions (**United States**, **India**, and **France**), evaluated under the **Macro $F_{0.5}$** metric (which places double the weight on precision over recall). The dataset features diverse structural challenges: pervasive spelling errors, variable abbreviations, native Indic scripts (Hindi, Marathi, Bengali, Tamil, etc.), glued alphanumeric tokens, missing address fields, and significant cross-country domain shifts.
+
+---
+
+## 🚀 Live Demo
+
+Try the real trained model (0.977 portal score) on a live interactive demo: **[https://amazonml2026-live-demo-in2twke8scuyr6lgbrwe6g.streamlit.app/](https://amazonml2026-live-demo-in2twke8scuyr6lgbrwe6g.streamlit.app/)**
+
+Runs the actual normalization, blocking, feature extraction, and LightGBM inference pipeline end-to-end in your browser. Uses a synthetic benchmark database in compliance with competition data redistribution rules (see [Honest Scope & Limitations](#honest-scope--limitations) section below) -- the model and pipeline code are 100% real.
 
 ---
 
@@ -102,6 +110,8 @@ Responsible for the full modeling and algorithmic pipeline post-initial reposito
 ---
 
 ## Repository Structure
+
+> **Interactive Demo Source**: The standalone Streamlit live demo application and synthetic benchmark database are available in the dedicated companion repository: **[prakhar2005vyas/AmazonML2026-live-demo](https://github.com/prakhar2005vyas/AmazonML2026-live-demo)**.
 
 ```
 .
